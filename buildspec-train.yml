@@ -1,0 +1,48 @@
+version: 0.2
+env:
+  shell: /bin/sh
+  variables:
+    PROCESSING_INSTANCE_TYPE: "ml.m5.xlarge"
+  parameter-store:
+    CODE_ARTIFACT_DOMAIN: "codeartifact-domain-name"
+    DOMAIN_OWNER: "codeartifact-domain-owner"
+    CODE_ARTIFACT_REPO: "codeartifact-shared-repo-name"
+    TRUSTED_KINESIS_ACCOUNT: "dev-TrustedDefaultKinesisAccount"
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - ENV_TYPE=$(aws ssm get-parameter --name EnvType --query 'Parameter.Value' --output text --region "${AWS_REGION}")
+      - DATA_BUCKET_ENV=$(aws ssm get-parameter --name "mlops-${ENV_TYPE}-data-bucket-name" --query 'Parameter.Value' --output text --region "${AWS_REGION}")
+      - MODEL_BUCKET=$(aws ssm get-parameter --name "mlops-${ENV_TYPE}-model-bucket-name" --query 'Parameter.Value' --output text --region "${AWS_REGION}")
+      - EBS_KMS_KEY_ARN=$(aws ssm get-parameter --name "mlops-${ENV_TYPE}-kms-ebs-key-arn" --query 'Parameter.Value' --output text --region "${AWS_REGION}")
+      - S3_KMS_KEY_ID=$(aws ssm get-parameter --name "mlops-${ENV_TYPE}-kms-s3-key-arn" --query 'Parameter.Value' --output text --region "${AWS_REGION}")
+      - SM_SG=$(aws ssm get-parameter --name "mlops-${ENV_TYPE}-sagemaker-sg-ids" --query 'Parameter.Value' --output text --region "${AWS_REGION}")
+      - SM_SUBNETS=$(aws ssm get-parameter --name "mlops-${ENV_TYPE}-private-subnet-ids" --query 'Parameter.Value' --output text --region "${AWS_REGION}")
+      - PIPELINE_NAME="${SAGEMAKER_PROJECT_NAME}-training-pipeline"
+      - aws codeartifact login --tool pip --domain ${CODE_ARTIFACT_DOMAIN} --domain-owner ${DOMAIN_OWNER} --repository ${CODE_ARTIFACT_REPO}
+      - pip install --upgrade --force-reinstall . awscli==1.22.99
+      - pip install --disable-pip-version-check -q sagemaker==2.131.0
+  pre_build:
+    commands:
+      - export PYTHONUNBUFFERED=TRUE
+      - export SAGEMAKER_PROJECT_NAME_ID="${SAGEMAKER_PROJECT_NAME}-${SAGEMAKER_PROJECT_ID}"
+      - export SOURCE_HEADHASH=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
+      - echo "Current revision short headhash is ${SOURCE_HEADHASH}"
+      - export SOURCE_SCRIPTS_PATH="s3://${MODEL_BUCKET}/lifecycle/max/${SAGEMAKER_PROJECT_NAME}/${PIPELINE_NAME}/${SOURCE_HEADHASH}/source_scripts"
+      - aws s3 cp ./source_scripts "${SOURCE_SCRIPTS_PATH}/" --recursive
+      - echo "Fetch trigger info"
+      - . scripts/fetch-trigger-info.sh
+  build:
+    commands:
+      - |
+        run-pipeline \
+          --module-name ml_pipelines.training.pipeline \
+          --role-arn $SAGEMAKER_PIPELINE_ROLE_ARN \
+          --tags "[{\"Key\":\"sagemaker:project-name\", \"Value\":\"${SAGEMAKER_PROJECT_NAME}\"}, {\"Key\":\"sagemaker:project-id\", \"Value\":\"${SAGEMAKER_PROJECT_ID}\"}, {\"Key\":\"EnvironmentName\", \"Value\":\"${ENV_NAME}\"}, {\"Key\":\"EnvironmentType\", \"Value\":\"${ENV_TYPE}\"}]" \
+          --kwargs "{\"region\":\"${AWS_REGION}\",\"project_name\":\"${SAGEMAKER_PROJECT_NAME}\",\"pipeline_name\":\"${PIPELINE_NAME}\",\"model_package_group_name\":\"${SAGEMAKER_PROJECT_NAME_ID}\",\"base_job_prefix\":\"${PIPELINE_NAME}\", \"revision\":\"${SOURCE_HEADHASH}\", \"source_scripts_path\":\"${SOURCE_SCRIPTS_PATH}\"}"
+  post_build:
+    commands:
+      - bash -c "if [ \"$CODEBUILD_BUILD_SUCCEEDING\" == \"0\" ]; then exit 1; fi"
+      - echo Build stage successfully completed on `date`

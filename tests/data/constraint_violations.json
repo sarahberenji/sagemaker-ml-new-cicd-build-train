@@ -1,0 +1,7 @@
+{
+  "violations" : [ {
+    "feature_name" : "_c0",
+    "constraint_check_type" : "data_type_check",
+    "description" : "Data type match requirement is not met. Expected data type: Integral, Expected match: 100.0%. Observed: Only 0.0% of data is Integral."
+  } ]
+}
